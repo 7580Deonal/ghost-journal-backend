@@ -29,30 +29,31 @@ const limiter = rateLimit({
 });
 
 app.use(helmet());
-app.use(cors({
-  origin: process.env.NODE_ENV === 'production'
-    ? [
-        'https://76ed0371-d368-4787-bbbe-9b7497991383.lovableproject.com',
-        'https://your-frontend-domain.vercel.app',
-        'https://*.railway.app'
-      ]
-    : [
-        'http://localhost:3000',
-        'http://localhost:5173',
-        'http://localhost:3001',
-        'http://localhost:3002',
-        'https://76ed0371-d368-4787-bbbe-9b7497991383.lovableproject.com'
-      ],
+// Permissive CORS configuration for Lovable frontend connection
+const corsOptions = {
+  origin: true, // Allow any origin for now
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
-}));
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+  optionsSuccessStatus: 200
+};
+
+app.use(cors(corsOptions));
 app.use(limiter);
 app.use(morgan('combined'));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 app.use('/uploads', express.static('uploads'));
+
+// Explicit OPTIONS handler for all API routes
+app.options('*', (req, res) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+  res.header('Access-Control-Allow-Credentials', 'true');
+  res.sendStatus(200);
+});
 
 app.get('/api/health', (req, res) => {
   res.json({
@@ -61,7 +62,12 @@ app.get('/api/health', (req, res) => {
     environment: process.env.NODE_ENV || 'development',
     proxy_trust: app.get('trust proxy'),
     client_ip: req.ip,
-    forwarded_for: req.get('X-Forwarded-For') || 'none'
+    forwarded_for: req.get('X-Forwarded-For') || 'none',
+    cors_info: {
+      origin: req.get('Origin') || 'none',
+      user_agent: req.get('User-Agent') || 'none',
+      referer: req.get('Referer') || 'none'
+    }
   });
 });
 
