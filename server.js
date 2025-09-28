@@ -94,22 +94,149 @@ const corsOptions = {
 app.use(cors(corsOptions));
 
 // ============================================================================
-// RATE LIMITING - Production Ready
+// RATE LIMITING - Production Ready with Frontend Whitelisting
 // ============================================================================
+
+// Define trusted IPs and domains for rate limiting exemption
+const trustedSources = {
+  ips: [
+    '172.58.15.173', // Lovable frontend IP
+    '127.0.0.1',     // Localhost
+    '::1',           // IPv6 localhost
+  ],
+  ipRanges: [
+    '172.16.0.0/12', // Private IP range (Docker/containers)
+    '10.0.0.0/8',    // Private IP range
+    '192.168.0.0/16' // Private IP range
+  ],
+  origins: [
+    'https://76ed0371-d368-4787-bbbe-9b7497991383.lovableproject.com',
+    /^https:\/\/.*\.lovableproject\.com$/,
+    /^https:\/\/.*\.lovable\.dev$/,
+    /^https:\/\/.*\.railway\.app$/,
+    /^https:\/\/.*\.vercel\.app$/
+  ]
+};
+
+// Helper function to check if IP is in range
+const isIPInRange = (ip, range) => {
+  try {
+    const [rangeIP, prefixLength] = range.split('/');
+    const ipNum = ipToNumber(ip);
+    const rangeNum = ipToNumber(rangeIP);
+    const mask = (0xffffffff << (32 - parseInt(prefixLength))) >>> 0;
+    return (ipNum & mask) === (rangeNum & mask);
+  } catch (error) {
+    return false;
+  }
+};
+
+const ipToNumber = (ip) => {
+  return ip.split('.').reduce((acc, octet) => (acc << 8) + parseInt(octet), 0) >>> 0;
+};
+
+// Check if request should be exempt from rate limiting
+const isExemptFromRateLimit = (req) => {
+  const clientIP = req.ip;
+  const origin = req.get('Origin');
+  const referer = req.get('Referer');
+
+  console.log('🔍 Rate limit check:', {
+    clientIP,
+    origin,
+    referer: referer?.substring(0, 100),
+    userAgent: req.get('User-Agent')?.substring(0, 50)
+  });
+
+  // Skip rate limiting for health checks
+  if (req.path === '/api/health') {
+    console.log('✅ Exempt: Health check endpoint');
+    return true;
+  }
+
+  // Check if IP is in trusted list
+  if (trustedSources.ips.includes(clientIP)) {
+    console.log('✅ Exempt: Trusted IP', clientIP);
+    return true;
+  }
+
+  // Check if IP is in trusted ranges
+  for (const range of trustedSources.ipRanges) {
+    if (isIPInRange(clientIP, range)) {
+      console.log('✅ Exempt: IP in trusted range', clientIP, range);
+      return true;
+    }
+  }
+
+  // Check if origin is trusted
+  if (origin) {
+    for (const trustedOrigin of trustedSources.origins) {
+      if (typeof trustedOrigin === 'string' && origin === trustedOrigin) {
+        console.log('✅ Exempt: Trusted origin', origin);
+        return true;
+      } else if (trustedOrigin instanceof RegExp && trustedOrigin.test(origin)) {
+        console.log('✅ Exempt: Origin matches pattern', origin);
+        return true;
+      }
+    }
+  }
+
+  // Check referer as fallback
+  if (referer && !origin) {
+    for (const trustedOrigin of trustedSources.origins) {
+      if (typeof trustedOrigin === 'string' && referer.includes(trustedOrigin)) {
+        console.log('✅ Exempt: Trusted referer', referer);
+        return true;
+      } else if (trustedOrigin instanceof RegExp && trustedOrigin.test(referer)) {
+        console.log('✅ Exempt: Referer matches pattern', referer);
+        return true;
+      }
+    }
+  }
+
+  console.log('⚠️ Not exempt from rate limiting');
+  return false;
+};
 
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 200, // Increased for file uploads
-  message: {
-    error: 'Too many requests',
-    message: 'Please try again in 15 minutes',
-    retryAfter: 15 * 60
+  max: 500, // Increased limit for legitimate traffic
+  message: (req) => {
+    // Return JSON instead of HTML for API endpoints
+    return {
+      success: false,
+      error: 'Rate limit exceeded',
+      message: 'Too many requests from this IP. Please try again in 15 minutes.',
+      retryAfter: Math.ceil(15 * 60),
+      clientIP: req.ip,
+      timestamp: new Date().toISOString()
+    };
   },
   standardHeaders: true,
   legacyHeaders: false,
-  skip: (req) => {
-    // Skip rate limiting for health checks
-    return req.path === '/api/health';
+  skip: isExemptFromRateLimit,
+  // Custom handler for when limit is exceeded
+  handler: (req, res) => {
+    console.log('🚫 Rate limit exceeded:', {
+      ip: req.ip,
+      path: req.path,
+      origin: req.get('Origin'),
+      userAgent: req.get('User-Agent')?.substring(0, 100)
+    });
+
+    // Always return JSON for API endpoints
+    res.status(429).json({
+      success: false,
+      error: 'RATE_LIMIT_EXCEEDED',
+      message: 'Too many requests from this IP. Please try again later.',
+      retryAfter: Math.ceil(15 * 60),
+      details: {
+        clientIP: req.ip,
+        limit: 500,
+        windowMs: 15 * 60 * 1000,
+        timestamp: new Date().toISOString()
+      }
+    });
   }
 });
 
@@ -128,18 +255,68 @@ app.use(morgan('combined', {
   }
 }));
 
+// Enhanced JSON error handling middleware
+app.use((req, res, next) => {
+  // Store original json method
+  const originalJson = res.json;
+
+  // Override json method to ensure we always return JSON
+  res.json = function(obj) {
+    // Set proper headers
+    res.set('Content-Type', 'application/json');
+
+    // Ensure the response is actually JSON serializable
+    try {
+      JSON.stringify(obj);
+      return originalJson.call(this, obj);
+    } catch (error) {
+      console.error('JSON serialization error:', error);
+      return originalJson.call(this, {
+        success: false,
+        error: 'Response serialization failed',
+        message: 'Internal server error'
+      });
+    }
+  };
+
+  next();
+});
+
 // Body parsing with larger limits for file uploads
 app.use(express.json({
   limit: '15mb',
   verify: (req, res, buf) => {
     req.rawBody = buf;
-  }
+  },
+  // Handle JSON parsing errors gracefully
+  type: ['application/json', 'text/plain']
 }));
+
 app.use(express.urlencoded({
   extended: true,
   limit: '15mb',
   parameterLimit: 50
 }));
+
+// JSON parsing error handler
+app.use((error, req, res, next) => {
+  if (error instanceof SyntaxError && error.status === 400 && 'body' in error) {
+    console.error('JSON parsing error:', {
+      error: error.message,
+      body: req.rawBody?.toString().substring(0, 200),
+      contentType: req.get('Content-Type'),
+      path: req.path
+    });
+
+    return res.status(400).json({
+      success: false,
+      error: 'INVALID_JSON',
+      message: 'Invalid JSON in request body',
+      details: error.message
+    });
+  }
+  next(error);
+});
 
 // Static file serving with caching
 app.use('/uploads', express.static('uploads', {
@@ -172,6 +349,10 @@ app.options('*', (req, res) => {
 // ============================================================================
 
 app.get('/api/health', (req, res) => {
+  const clientIP = req.ip;
+  const origin = req.get('Origin');
+  const isExempt = isExemptFromRateLimit(req);
+
   const healthData = {
     status: 'healthy',
     timestamp: new Date().toISOString(),
@@ -184,13 +365,25 @@ app.get('/api/health', (req, res) => {
     },
     system: {
       proxy_trust: app.get('trust proxy'),
-      client_ip: req.ip,
+      client_ip: clientIP,
       forwarded_for: req.get('X-Forwarded-For') || 'none',
       user_agent: req.get('User-Agent')?.substring(0, 100) || 'none'
     },
     cors: {
-      origin: req.get('Origin') || 'none',
-      origin_allowed: req.get('Origin') ? 'checking...' : 'no-origin'
+      origin: origin || 'none',
+      origin_allowed: origin ? 'yes' : 'no-origin'
+    },
+    rate_limiting: {
+      client_exempt: isExempt,
+      trusted_ip: trustedSources.ips.includes(clientIP),
+      limit: 500,
+      window: '15 minutes',
+      current_ip: clientIP
+    },
+    api: {
+      anthropic_configured: !!process.env.ANTHROPIC_API_KEY,
+      upload_enabled: true,
+      max_upload_size: '15MB'
     }
   };
 
