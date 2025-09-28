@@ -45,8 +45,11 @@ const corsOptions = {
     // Define allowed origins with specific Lovable domain support
     const allowedOrigins = [
       'https://76ed0371-d368-4787-bbbe-9b7497991383.lovableproject.com',
+      'https://1d-preview-76ed0371-d368-4787-bbbe-9b7497991383.lovable.app',
       /^https:\/\/.*\.lovableproject\.com$/,
       /^https:\/\/.*\.lovable\.dev$/,
+      /^https:\/\/.*-preview-.*\.lovable\.app$/,
+      /^https:\/\/.*\.lovable\.app$/,
       'https://lovable.dev',
       /^https:\/\/.*\.railway\.app$/,
       /^https:\/\/.*\.vercel\.app$/,
@@ -84,11 +87,24 @@ const corsOptions = {
     'Cache-Control',
     'X-File-Name',
     'X-File-Size',
-    'X-Upload-Type'
+    'X-Upload-Type',
+    // Additional headers for FormData uploads
+    'Content-Length',
+    'Content-Disposition',
+    'X-Content-Type-Options',
+    'Access-Control-Request-Method',
+    'Access-Control-Request-Headers'
   ],
-  exposedHeaders: ['X-Total-Count', 'X-Rate-Limit-Remaining'],
+  exposedHeaders: [
+    'X-Total-Count',
+    'X-Rate-Limit-Remaining',
+    'Content-Type',
+    'Content-Length'
+  ],
   optionsSuccessStatus: 200,
-  preflightContinue: false
+  preflightContinue: false,
+  // Important for file uploads - maxAge for preflight cache
+  maxAge: 86400 // 24 hours
 };
 
 app.use(cors(corsOptions));
@@ -258,6 +274,35 @@ app.use(morgan('combined', {
   }
 }));
 
+// Special middleware to debug FormData upload requests
+app.use('/api', (req, res, next) => {
+  console.log('🔍 Incoming API request:', {
+    method: req.method,
+    path: req.path,
+    originalUrl: req.originalUrl,
+    contentType: req.get('Content-Type'),
+    origin: req.get('Origin'),
+    userAgent: req.get('User-Agent')?.substring(0, 50),
+    headers: {
+      'content-length': req.get('Content-Length'),
+      'accept': req.get('Accept'),
+      'authorization': req.get('Authorization') ? 'present' : 'none'
+    }
+  });
+
+  // Special logging for upload endpoints
+  if (req.path.includes('upload') || req.path.includes('trades')) {
+    console.log('📤 Upload endpoint accessed:', {
+      isFormData: req.get('Content-Type')?.includes('multipart/form-data'),
+      hasFiles: !!req.files,
+      hasFile: !!req.file,
+      bodyPresent: !!req.body && Object.keys(req.body).length > 0
+    });
+  }
+
+  next();
+});
+
 // Enhanced JSON error handling middleware
 app.use((req, res, next) => {
   // Store original json method
@@ -328,22 +373,62 @@ app.use('/uploads', express.static('uploads', {
 }));
 
 // ============================================================================
-// EXPLICIT PREFLIGHT HANDLING
+// EXPLICIT PREFLIGHT HANDLING - Enhanced for FormData uploads
 // ============================================================================
 
 app.options('*', (req, res) => {
   const origin = req.get('Origin');
+  const requestedMethod = req.get('Access-Control-Request-Method');
+  const requestedHeaders = req.get('Access-Control-Request-Headers');
 
-  if (origin && corsOptions.origin(origin, () => {})) {
-    res.header('Access-Control-Allow-Origin', origin);
-  } else {
-    res.header('Access-Control-Allow-Origin', '*');
+  console.log('🔍 CORS Preflight request:', {
+    origin: origin,
+    method: requestedMethod,
+    headers: requestedHeaders,
+    path: req.path,
+    userAgent: req.get('User-Agent')?.substring(0, 50)
+  });
+
+  // Check if origin is allowed
+  let allowedOrigin = '*';
+  if (origin) {
+    corsOptions.origin(origin, (err, allowed) => {
+      if (allowed) {
+        allowedOrigin = origin;
+        console.log('✅ CORS preflight: Origin allowed:', origin);
+      } else {
+        console.log('❌ CORS preflight: Origin blocked:', origin);
+      }
+    });
   }
 
+  // Set comprehensive CORS headers for FormData uploads
+  res.header('Access-Control-Allow-Origin', allowedOrigin);
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
-  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, Accept, Origin');
+  res.header('Access-Control-Allow-Headers', [
+    'Content-Type',
+    'Authorization',
+    'X-Requested-With',
+    'Accept',
+    'Origin',
+    'Cache-Control',
+    'X-File-Name',
+    'X-File-Size',
+    'X-Upload-Type',
+    'Content-Length',
+    'Content-Disposition',
+    'Access-Control-Request-Method',
+    'Access-Control-Request-Headers'
+  ].join(', '));
   res.header('Access-Control-Allow-Credentials', 'true');
   res.header('Access-Control-Max-Age', '86400'); // 24 hours
+
+  // For FormData uploads, explicitly allow any content-type
+  if (requestedHeaders && requestedHeaders.toLowerCase().includes('content-type')) {
+    console.log('📤 Preflight for FormData upload detected');
+  }
+
+  console.log('✅ CORS preflight response sent');
   res.sendStatus(200);
 });
 
