@@ -394,6 +394,46 @@ app.get('/api/health', (req, res) => {
   res.json(healthData);
 });
 
+// Debug endpoint to list registered routes
+app.get('/api/routes', (req, res) => {
+  const routes = [];
+
+  app._router.stack.forEach((middleware) => {
+    if (middleware.route) {
+      // Direct routes
+      const methods = Object.keys(middleware.route.methods);
+      routes.push({
+        path: middleware.route.path,
+        methods: methods,
+        type: 'direct'
+      });
+    } else if (middleware.name === 'router') {
+      // Router middleware
+      middleware.handle.stack.forEach((handler) => {
+        if (handler.route) {
+          const methods = Object.keys(handler.route.methods);
+          routes.push({
+            path: '/api' + handler.route.path,
+            methods: methods,
+            type: 'router'
+          });
+        }
+      });
+    }
+  });
+
+  res.json({
+    success: true,
+    totalRoutes: routes.length,
+    routes: routes,
+    specificChecks: {
+      hasUploadTrade: routes.some(r => r.path === '/api/upload-trade'),
+      hasTradesUpload: routes.some(r => r.path === '/api/trades/upload'),
+      hasTest: routes.some(r => r.path === '/api/test')
+    }
+  });
+});
+
 // ============================================================================
 // API ROUTES
 // ============================================================================
