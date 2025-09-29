@@ -24,56 +24,211 @@ class ClaudeAnalysisService {
 
       const prompt = this.buildAnalysisPrompt(tradeContext);
 
+      // Validate inputs before sending
+      console.log('🔍 Pre-flight validation:', {
+        hasApiKey: !!this.apiKey,
+        apiKeyLength: this.apiKey ? this.apiKey.length : 0,
+        apiKeyPrefix: this.apiKey ? this.apiKey.substring(0, 8) + '...' : 'none',
+        imageDataLength: imageData.length,
+        mediaType: mediaType,
+        promptLength: prompt.length,
+        filePath: filePath
+      });
+
+      // Build request payload
+      const requestPayload = {
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 2000,
+        messages: [
+          {
+            role: 'user',
+            content: [
+              {
+                type: 'text',
+                text: prompt
+              },
+              {
+                type: 'image',
+                source: {
+                  type: 'base64',
+                  media_type: mediaType,
+                  data: imageData
+                }
+              }
+            ]
+          }
+        ]
+      };
+
+      const requestHeaders = {
+        'Content-Type': 'application/json',
+        'x-api-key': this.apiKey,
+        'anthropic-version': '2023-06-01'
+      };
+
+      console.log('📤 Sending request to Claude API:', {
+        url: this.apiUrl,
+        method: 'POST',
+        model: requestPayload.model, // Explicitly log the model being used
+        headers: {
+          'Content-Type': requestHeaders['Content-Type'],
+          'anthropic-version': requestHeaders['anthropic-version'],
+          'x-api-key': this.apiKey ? `${this.apiKey.substring(0, 8)}...` : 'MISSING'
+        },
+        payload: {
+          model: requestPayload.model,
+          max_tokens: requestPayload.max_tokens,
+          messagesCount: requestPayload.messages.length,
+          contentCount: requestPayload.messages[0].content.length,
+          imageDataSize: `${Math.round(imageData.length / 1024)}KB`,
+          promptPreview: prompt.substring(0, 100) + '...'
+        }
+      });
+
+      console.log('✅ Using Claude model:', requestPayload.model);
+
       const response = await axios.post(
         this.apiUrl,
+        requestPayload,
         {
-          model: 'claude-3-5-sonnet-20241022',
-          max_tokens: 2000,
-          messages: [
-            {
-              role: 'user',
-              content: [
-                {
-                  type: 'text',
-                  text: prompt
-                },
-                {
-                  type: 'image',
-                  source: {
-                    type: 'base64',
-                    media_type: mediaType,
-                    data: imageData
-                  }
-                }
-              ]
-            }
-          ]
-        },
-        {
-          headers: {
-            'Content-Type': 'application/json',
-            'x-api-key': this.apiKey,
-            'anthropic-version': '2023-06-01'
-          },
-          timeout: 30000
+          headers: requestHeaders,
+          timeout: 45000,
+          validateStatus: function (status) {
+            // Accept any status code to handle errors gracefully
+            return status < 600;
+          }
         }
       );
 
-      const analysisText = response.data.content[0].text;
+      console.log('📥 Received response from Claude API');
+      console.log('📊 Response details:', {
+        status: response.status,
+        statusText: response.statusText,
+        headers: {
+          'content-type': response.headers['content-type'],
+          'content-length': response.headers['content-length']
+        }
+      });
+
+      // Log raw response for debugging
+      console.log('📄 Raw response data:', {
+        dataType: typeof response.data,
+        dataKeys: response.data ? Object.keys(response.data) : [],
+        isString: typeof response.data === 'string',
+        isObject: typeof response.data === 'object',
+        dataPreview: typeof response.data === 'string'
+          ? response.data.substring(0, 300) + '...'
+          : JSON.stringify(response.data, null, 2).substring(0, 500) + '...'
+      });
+
+      // Handle non-200 responses
+      if (response.status !== 200) {
+        console.error('❌ Non-200 response from Claude API:', {
+          status: response.status,
+          statusText: response.statusText,
+          data: response.data
+        });
+
+        if (response.status === 401) {
+          throw new Error('Invalid Anthropic API key - authentication failed');
+        } else if (response.status === 400) {
+          throw new Error(`Bad request to Claude API: ${JSON.stringify(response.data)}`);
+        } else if (response.status === 429) {
+          throw new Error('Rate limit exceeded on Claude API');
+        } else {
+          throw new Error(`Claude API returned status ${response.status}: ${response.statusText}`);
+        }
+      }
+
+      // Handle HTML error responses (like proxy errors)
+      if (typeof response.data === 'string' && response.data.includes('<html>')) {
+        console.error('❌ Received HTML response instead of JSON:', {
+          contentType: response.headers['content-type'],
+          dataPreview: response.data.substring(0, 500)
+        });
+        throw new Error('Received HTML response from Claude API - possible proxy or network error');
+      }
+
+      // Validate response structure
+      if (!response.data || typeof response.data !== 'object') {
+        console.error('❌ Invalid response data type:', typeof response.data);
+        throw new Error(`Invalid response data type: ${typeof response.data}`);
+      }
+
+      if (!response.data.content || !Array.isArray(response.data.content)) {
+        console.error('❌ Missing or invalid content array:', {
+          hasContent: !!response.data.content,
+          contentType: typeof response.data.content,
+          responseData: response.data
+        });
+        throw new Error('Invalid response structure from Claude API - missing content array');
+      }
+
+      if (response.data.content.length === 0) {
+        console.error('❌ Empty content array in response');
+        throw new Error('Empty content array in Claude API response');
+      }
+
+      const firstContent = response.data.content[0];
+      console.log('🔍 First content item:', {
+        type: typeof firstContent,
+        keys: firstContent ? Object.keys(firstContent) : [],
+        contentType: firstContent?.type,
+        hasText: !!firstContent?.text,
+        textType: typeof firstContent?.text,
+        textLength: firstContent?.text?.length || 0
+      });
+
+      if (!firstContent || typeof firstContent.text !== 'string') {
+        console.error('❌ Invalid content format:', firstContent);
+        throw new Error('Invalid content format in Claude API response');
+      }
+
+      const analysisText = firstContent.text;
+      console.log('✅ Successfully extracted analysis text:', {
+        length: analysisText.length,
+        preview: analysisText.substring(0, 300) + '...',
+        endsWithBrace: analysisText.trim().endsWith('}'),
+        startsWithBrace: analysisText.trim().startsWith('{')
+      });
+
       return this.parseAnalysisResponse(analysisText);
 
     } catch (error) {
-      console.error('Claude API Error:', error.response?.data || error.message);
+      console.error('❌ Claude API Error Details:', {
+        message: error.message,
+        status: error.response?.status,
+        statusText: error.response?.statusText,
+        data: error.response?.data,
+        code: error.code,
+        url: this.apiUrl
+      });
 
+      // Handle specific HTTP status codes
       if (error.response?.status === 401) {
-        throw new Error('Invalid Anthropic API key');
+        throw new Error('Invalid Anthropic API key - please check your ANTHROPIC_API_KEY environment variable');
       } else if (error.response?.status === 429) {
         throw new Error('API rate limit exceeded. Please try again later.');
+      } else if (error.response?.status === 400) {
+        const errorData = error.response.data;
+        if (errorData?.error?.type === 'invalid_request_error') {
+          throw new Error(`Invalid request: ${errorData.error.message}`);
+        }
+        throw new Error(`Bad request to Claude API: ${errorData?.error?.message || 'Unknown error'}`);
+      } else if (error.response?.status === 500) {
+        throw new Error('Claude API server error. Please try again later.');
       } else if (error.code === 'ECONNABORTED') {
-        throw new Error('Analysis request timed out');
+        throw new Error('Analysis request timed out. The image may be too large or complex.');
+      } else if (error.code === 'ENOTFOUND' || error.code === 'ECONNREFUSED') {
+        throw new Error('Unable to connect to Claude API. Please check your internet connection.');
+      } else if (error.response) {
+        // HTTP error response
+        throw new Error(`Claude API returned status ${error.response.status}: ${error.response.statusText}`);
       } else {
-        const apiError = new Error('Failed to analyze trading screenshot');
+        // Network or other error
+        const apiError = new Error(`Failed to analyze trading screenshot: ${error.message}`);
         apiError.code = 'ANTHROPIC_API_ERROR';
+        apiError.originalError = error;
         throw apiError;
       }
     }
@@ -137,55 +292,117 @@ Provide only the JSON response without additional text.`;
   }
 
   parseAnalysisResponse(analysisText) {
-    try {
-      const jsonMatch = analysisText.match(/\{[\s\S]*\}/);
+    console.log('🔍 Starting to parse Claude response...');
 
-      if (!jsonMatch) {
+    try {
+      // Clean the analysis text
+      const cleanedText = analysisText.trim();
+      console.log('📏 Cleaned text length:', cleanedText.length);
+
+      // Try multiple JSON extraction methods
+      let jsonData = null;
+      let jsonText = '';
+
+      // Method 1: Look for JSON block between ```json and ```
+      const jsonBlockMatch = cleanedText.match(/```json\s*([\s\S]*?)\s*```/);
+      if (jsonBlockMatch) {
+        jsonText = jsonBlockMatch[1].trim();
+        console.log('✅ Found JSON in code block');
+      } else {
+        // Method 2: Look for any JSON object (original method)
+        const jsonMatch = cleanedText.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          jsonText = jsonMatch[0];
+          console.log('✅ Found JSON object in text');
+        } else {
+          // Method 3: Try to find JSON starting with opening brace
+          const braceIndex = cleanedText.indexOf('{');
+          const lastBraceIndex = cleanedText.lastIndexOf('}');
+
+          if (braceIndex !== -1 && lastBraceIndex !== -1 && lastBraceIndex > braceIndex) {
+            jsonText = cleanedText.substring(braceIndex, lastBraceIndex + 1);
+            console.log('✅ Extracted JSON between braces');
+          }
+        }
+      }
+
+      if (!jsonText) {
+        console.log('❌ No JSON found in response. Response preview:', cleanedText.substring(0, 300));
         throw new Error('No valid JSON found in analysis response');
       }
 
-      const parsed = JSON.parse(jsonMatch[0]);
+      console.log('📝 JSON text preview:', jsonText.substring(0, 200) + '...');
 
-      return {
-        setup_quality: Math.max(1, Math.min(10, parsed.setup_quality || 5)),
-        risk_reward_ratio: Math.max(0, parsed.risk_reward_ratio || 1),
-        pattern_type: this.validatePattern(parsed.pattern_type) || 'unknown',
-        entry_quality: this.validateQuality(parsed.entry_quality) || 'fair',
-        stop_placement: this.validatePlacement(parsed.stop_placement) || 'unclear',
-        target_selection: this.validateSelection(parsed.target_selection) || 'unclear',
-        ai_commentary: parsed.ai_commentary || 'Analysis completed',
-        risk_amount: Math.max(0, parsed.risk_amount || 0),
-        within_limits: parsed.within_limits === true,
-        session_timing: this.validateTiming(parsed.session_timing) || 'acceptable',
-        trade_frequency: parsed.trade_frequency || 'Unknown frequency assessment',
-        learning_insights: parsed.learning_insights || 'No historical patterns referenced',
-        recommendation: this.validateRecommendation(parsed.recommendation) || 'WAIT',
-        confidence_score: Math.max(0, Math.min(1, parsed.confidence_score || 0.5)),
-        specific_observations: Array.isArray(parsed.specific_observations)
-          ? parsed.specific_observations
+      // Clean up common JSON formatting issues
+      jsonText = jsonText
+        .replace(/\n/g, ' ')           // Replace newlines with spaces
+        .replace(/\s+/g, ' ')          // Normalize whitespace
+        .replace(/,\s*}/g, '}')        // Remove trailing commas
+        .replace(/,\s*]/g, ']')        // Remove trailing commas in arrays
+        .trim();
+
+      // Parse the JSON
+      jsonData = JSON.parse(jsonText);
+      console.log('✅ Successfully parsed JSON');
+
+      // Validate required fields exist
+      const result = {
+        setup_quality: this.parseNumber(jsonData.setup_quality, 1, 10, 5),
+        risk_reward_ratio: this.parseNumber(jsonData.risk_reward_ratio, 0, 10, 2),
+        pattern_type: this.validatePattern(jsonData.pattern_type) || 'unknown',
+        entry_quality: this.validateQuality(jsonData.entry_quality) || 'fair',
+        stop_placement: this.validatePlacement(jsonData.stop_placement) || 'unclear',
+        target_selection: this.validateSelection(jsonData.target_selection) || 'unclear',
+        ai_commentary: typeof jsonData.ai_commentary === 'string' ? jsonData.ai_commentary : 'Analysis completed',
+        risk_amount: this.parseNumber(jsonData.risk_amount, 0, 1000, 50),
+        within_limits: Boolean(jsonData.within_limits),
+        session_timing: this.validateTiming(jsonData.session_timing) || 'acceptable',
+        trade_frequency: typeof jsonData.trade_frequency === 'string' ? jsonData.trade_frequency : 'Assessment completed',
+        learning_insights: typeof jsonData.learning_insights === 'string' ? jsonData.learning_insights : 'Analysis provided',
+        recommendation: this.validateRecommendation(jsonData.recommendation) || 'WAIT',
+        confidence_score: this.parseNumber(jsonData.confidence_score, 0, 1, 0.5),
+        specific_observations: Array.isArray(jsonData.specific_observations)
+          ? jsonData.specific_observations.slice(0, 10) // Limit to 10 observations
           : ['Analysis completed successfully']
       };
-    } catch (error) {
-      console.error('Failed to parse Claude response:', error);
 
+      console.log('✅ Successfully created analysis result');
+      return result;
+
+    } catch (error) {
+      console.error('❌ Failed to parse Claude response:', error.message);
+      console.error('📄 Full response text:', analysisText);
+
+      // Return fallback analysis with error info
       return {
         setup_quality: 5,
-        risk_reward_ratio: 1,
+        risk_reward_ratio: 2,
         pattern_type: 'unknown',
         entry_quality: 'fair',
         stop_placement: 'unclear',
         target_selection: 'unclear',
-        ai_commentary: 'Analysis parsing failed. Manual review recommended.',
-        risk_amount: 0,
+        ai_commentary: `Analysis parsing failed: ${error.message}. Raw response length: ${analysisText.length} characters. Manual review recommended.`,
+        risk_amount: 50,
         within_limits: false,
         session_timing: 'unclear',
-        trade_frequency: 'Unable to assess',
-        learning_insights: 'Analysis incomplete',
+        trade_frequency: 'Unable to assess due to parsing error',
+        learning_insights: 'Analysis incomplete - parsing error occurred',
         recommendation: 'SKIP',
         confidence_score: 0.1,
-        specific_observations: ['Parsing error occurred']
+        specific_observations: [
+          'Parsing error occurred',
+          `Error: ${error.message}`,
+          'Manual review required'
+        ]
       };
     }
+  }
+
+  // Helper method to safely parse numbers
+  parseNumber(value, min, max, defaultValue) {
+    const parsed = parseFloat(value);
+    if (isNaN(parsed)) return defaultValue;
+    return Math.max(min, Math.min(max, parsed));
   }
 
   validatePattern(pattern) {
@@ -223,10 +440,49 @@ Provide only the JSON response without additional text.`;
 
   encodeImageToBase64(filePath) {
     try {
+      console.log('📸 Encoding image to base64:', {
+        filePath: filePath,
+        exists: fs.existsSync(filePath)
+      });
+
+      if (!fs.existsSync(filePath)) {
+        throw new Error(`Image file not found: ${filePath}`);
+      }
+
+      const stats = fs.statSync(filePath);
+      console.log('📊 File stats:', {
+        size: stats.size,
+        sizeKB: Math.round(stats.size / 1024),
+        sizeMB: Math.round(stats.size / 1024 / 1024),
+        isFile: stats.isFile()
+      });
+
+      // Check file size (Claude API has limits)
+      const maxSizeBytes = 20 * 1024 * 1024; // 20MB limit
+      if (stats.size > maxSizeBytes) {
+        throw new Error(`Image file too large: ${Math.round(stats.size / 1024 / 1024)}MB (max 20MB)`);
+      }
+
+      if (stats.size === 0) {
+        throw new Error('Image file is empty');
+      }
+
       const imageBuffer = fs.readFileSync(filePath);
-      return imageBuffer.toString('base64');
+      const base64Data = imageBuffer.toString('base64');
+
+      console.log('✅ Image encoded successfully:', {
+        originalSize: stats.size,
+        base64Length: base64Data.length,
+        compressionRatio: Math.round((base64Data.length / stats.size) * 100) / 100
+      });
+
+      return base64Data;
     } catch (error) {
-      throw new Error(`Failed to read image file: ${error.message}`);
+      console.error('❌ Image encoding failed:', {
+        filePath: filePath,
+        error: error.message
+      });
+      throw new Error(`Failed to encode image: ${error.message}`);
     }
   }
 
@@ -235,9 +491,27 @@ Provide only the JSON response without additional text.`;
       '.png': 'image/png',
       '.jpg': 'image/jpeg',
       '.jpeg': 'image/jpeg',
-      '.pdf': 'application/pdf'
+      '.pdf': 'application/pdf',
+      '.webp': 'image/webp',
+      '.gif': 'image/gif'
     };
-    return mediaTypes[extension] || 'image/png';
+
+    const normalizedExtension = extension.toLowerCase();
+    const mediaType = mediaTypes[normalizedExtension];
+
+    console.log('🎭 Media type detection:', {
+      extension: extension,
+      normalized: normalizedExtension,
+      detected: mediaType,
+      supported: !!mediaType
+    });
+
+    if (!mediaType) {
+      console.warn('⚠️ Unsupported file extension, defaulting to image/png');
+      return 'image/png';
+    }
+
+    return mediaType;
   }
 
   getCurrentWeekNumber() {
@@ -264,7 +538,7 @@ Provide only the JSON response without additional text.`;
       const response = await axios.post(
         this.apiUrl,
         {
-          model: 'claude-3-5-sonnet-20241022',
+          model: 'claude-sonnet-4-20250514',
           max_tokens: 3000, // Increased for detailed execution analysis
           messages: [
             {
@@ -499,7 +773,7 @@ Provide only the JSON response without additional text.`;
       const response = await axios.post(
         this.apiUrl,
         {
-          model: 'claude-3-5-sonnet-20241022',
+          model: 'claude-sonnet-4-20250514',
           max_tokens: 4000, // Increased for comprehensive multi-timeframe analysis
           messages: [
             {
@@ -778,7 +1052,7 @@ Provide only the JSON response without additional text.`;
       const response = await axios.post(
         this.apiUrl,
         {
-          model: 'claude-3-5-sonnet-20241022',
+          model: 'claude-sonnet-4-20250514',
           max_tokens: 4000,
           messages: [
             {
@@ -877,7 +1151,7 @@ Provide only the JSON response without additional text.`;
       const response = await axios.post(
         this.apiUrl,
         {
-          model: 'claude-3-5-sonnet-20241022',
+          model: 'claude-sonnet-4-20250514',
           max_tokens: 4000,
           messages: [
             {
