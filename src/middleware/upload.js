@@ -60,10 +60,30 @@ const fileFilter = (req, file, cb) => {
 const upload = multer({
   storage: storage,
   limits: {
-    fileSize: parseInt(process.env.MAX_FILE_SIZE) || 10 * 1024 * 1024,
-    files: 1
+    fileSize: parseInt(process.env.MAX_FILE_SIZE) || 20 * 1024 * 1024, // 20MB
+    files: 10, // Allow multiple files for flexibility
+    fieldSize: 5 * 1024 * 1024, // 5MB field size
+    fields: 20, // Allow multiple fields
+    parts: 30 // Allow multiple parts
   },
-  fileFilter: fileFilter
+  fileFilter: (req, file, cb) => {
+    console.log('🔍 Multer fileFilter called:', {
+      fieldname: file.fieldname,
+      originalname: file.originalname,
+      mimetype: file.mimetype,
+      encoding: file.encoding
+    });
+
+    const allowedTypes = ['image/png', 'image/jpeg', 'image/jpg', 'application/pdf'];
+
+    if (allowedTypes.includes(file.mimetype)) {
+      console.log('✅ File type accepted:', file.mimetype);
+      cb(null, true);
+    } else {
+      console.log('❌ File type rejected:', file.mimetype);
+      cb(new Error(`Invalid file type: ${file.mimetype}. Only PNG, JPEG, and PDF files are allowed.`), false);
+    }
+  }
 });
 
 // Multi-timeframe upload configuration (legacy support)
@@ -89,27 +109,82 @@ const universalTimeframeUpload = multer({
 });
 
 const validateUploadedFile = (req, res, next) => {
-  if (!req.file) {
+  console.log('🔍 File validation debug:', {
+    hasReqFile: !!req.file,
+    hasReqFiles: !!req.files,
+    filesCount: req.files ? req.files.length : 0,
+    bodyKeys: Object.keys(req.body || {}),
+    contentType: req.get('Content-Type'),
+    contentLength: req.get('Content-Length')
+  });
+
+  // Handle both single file (req.file) and multiple files (req.files) scenarios
+  let uploadedFile = null;
+
+  if (req.file) {
+    uploadedFile = req.file;
+    console.log('✅ Found file in req.file:', {
+      fieldname: req.file.fieldname,
+      originalname: req.file.originalname,
+      size: req.file.size
+    });
+  } else if (req.files && req.files.length > 0) {
+    uploadedFile = req.files[0]; // Use the first file
+    req.file = uploadedFile; // Set req.file for backward compatibility
+    console.log('✅ Found file in req.files[0]:', {
+      fieldname: uploadedFile.fieldname,
+      originalname: uploadedFile.originalname,
+      size: uploadedFile.size
+    });
+  }
+
+  if (!uploadedFile) {
+    console.log('❌ No file found in request');
     return res.status(400).json({
       success: false,
       error: 'No File Uploaded',
-      message: 'Please upload a trading screenshot (PNG, JPEG, or PDF)'
+      message: 'Please upload a trading screenshot (PNG, JPEG, or PDF)',
+      debug_info: {
+        has_req_file: !!req.file,
+        has_req_files: !!req.files,
+        files_count: req.files ? req.files.length : 0,
+        body_keys: Object.keys(req.body || {}),
+        content_type: req.get('Content-Type'),
+        content_length: req.get('Content-Length'),
+        expected_fields: ['file', 'image', 'screenshot', 'upload', 'document', 'attachment'],
+        received_fields: req.files ? req.files.map(f => f.fieldname) : []
+      }
     });
   }
 
   const allowedExtensions = ['.png', '.jpg', '.jpeg', '.pdf'];
-  const fileExtension = path.extname(req.file.filename).toLowerCase();
+  const fileExtension = path.extname(uploadedFile.filename || uploadedFile.originalname).toLowerCase();
+
+  console.log('🔍 File extension check:', {
+    filename: uploadedFile.filename,
+    originalname: uploadedFile.originalname,
+    extension: fileExtension,
+    allowed: allowedExtensions.includes(fileExtension)
+  });
 
   if (!allowedExtensions.includes(fileExtension)) {
-    fs.unlinkSync(req.file.path);
+    fs.unlinkSync(uploadedFile.path);
     return res.status(400).json({
       success: false,
       error: 'Invalid File Type',
-      message: 'Only PNG, JPEG, and PDF files are supported for trading screenshots'
+      message: 'Only PNG, JPEG, and PDF files are supported for trading screenshots',
+      received_extension: fileExtension,
+      allowed_extensions: allowedExtensions
     });
   }
 
-  req.file.relativePath = path.relative('./', req.file.path);
+  uploadedFile.relativePath = path.relative('./', uploadedFile.path);
+  console.log('✅ File validation passed:', {
+    path: uploadedFile.path,
+    relativePath: uploadedFile.relativePath,
+    size: uploadedFile.size
+  });
+
   next();
 };
 
