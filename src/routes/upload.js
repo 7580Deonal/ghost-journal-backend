@@ -10,8 +10,65 @@ const ClaudeAnalysisService = require('../services/claudeAnalysis');
 const router = express.Router();
 const claudeService = new ClaudeAnalysisService();
 
+// Debug route to test if routes are working
+router.get('/test', (req, res) => {
+  res.json({
+    success: true,
+    message: 'Upload routes are working',
+    timestamp: new Date().toISOString(),
+    availableRoutes: [
+      'POST /api/upload-trade',
+      'POST /api/trades/upload',
+      'POST /api/upload-trade-multi',
+      'GET /api/test'
+    ]
+  });
+});
+
+// Debug middleware to log raw request details before multer
+const debugRequest = (req, res, next) => {
+  console.log('🔍 Raw request debug (before multer):', {
+    method: req.method,
+    contentType: req.get('Content-Type'),
+    contentLength: req.get('Content-Length'),
+    hasBody: !!req.body,
+    bodyKeys: Object.keys(req.body || {}),
+    hasFiles: !!req.files,
+    hasFile: !!req.file,
+    headers: {
+      'content-type': req.get('Content-Type'),
+      'content-length': req.get('Content-Length'),
+      'content-disposition': req.get('Content-Disposition')
+    }
+  });
+  next();
+};
+
+// Enhanced flexible upload handler that accepts any field name
+const flexibleUpload = upload.any();
+
+// Main upload endpoint (original)
 router.post('/upload-trade',
-  upload.single('screenshot'),
+  debugRequest,
+  flexibleUpload,
+  (req, res, next) => {
+    console.log('📁 Post-multer debug:', {
+      hasFiles: !!req.files,
+      filesLength: req.files ? req.files.length : 0,
+      hasFile: !!req.file,
+      bodyKeys: Object.keys(req.body || {}),
+      filesArray: req.files ? req.files.map(f => ({
+        fieldname: f.fieldname,
+        originalname: f.originalname,
+        mimetype: f.mimetype,
+        size: f.size,
+        destination: f.destination,
+        filename: f.filename,
+        path: f.path
+      })) : []
+    });
+    next();
+  },
   validateUploadedFile,
   asyncHandler(async (req, res) => {
     const db = getDatabase();
@@ -101,6 +158,155 @@ router.post('/upload-trade',
           year: year,
           trades_this_week: tradeContext.tradesThisWeek,
           weekly_progress: tradeContext.weeklyProgress
+        }
+      };
+
+      res.json({
+        success: true,
+        message: 'Trading screenshot analyzed successfully',
+        data: response
+      });
+
+    } catch (error) {
+      console.error('Upload analysis error:', error);
+
+      await cleanupFailedUpload(req.file.path, tradeId);
+
+      if (error.code === 'ANTHROPIC_API_ERROR') {
+        return res.status(503).json({
+          success: false,
+          error: 'AI Analysis Failed',
+          message: 'Unable to analyze screenshot. Please try again.',
+          trade_id: tradeId
+        });
+      }
+
+      throw error;
+    } finally {
+      db.close();
+    }
+  })
+);
+
+// Alternative route path for frontend compatibility (/api/trades/upload)
+router.post('/trades/upload',
+  (req, res, next) => {
+    console.log('🎯 /api/trades/upload route HIT!', {
+      method: req.method,
+      path: req.path,
+      originalUrl: req.originalUrl,
+      contentType: req.get('Content-Type'),
+      hasFiles: !!req.files,
+      hasFile: !!req.file,
+      bodyKeys: Object.keys(req.body || {})
+    });
+    next();
+  },
+  debugRequest,
+  flexibleUpload,
+  (req, res, next) => {
+    console.log('📁 Post-multer debug (/trades/upload):', {
+      hasFiles: !!req.files,
+      filesLength: req.files ? req.files.length : 0,
+      hasFile: !!req.file,
+      bodyKeys: Object.keys(req.body || {}),
+      filesArray: req.files ? req.files.map(f => ({
+        fieldname: f.fieldname,
+        originalname: f.originalname,
+        mimetype: f.mimetype,
+        size: f.size,
+        destination: f.destination,
+        filename: f.filename,
+        path: f.path
+      })) : [],
+      multerError: req.multerError || 'none'
+    });
+    next();
+  },
+  validateUploadedFile,
+  asyncHandler(async (req, res) => {
+    console.log('📍 Processing upload in /api/trades/upload route');
+
+    const db = getDatabase();
+    const tradeId = uuidv4();
+    const timestamp = new Date();
+    const weekNumber = getWeekNumber(timestamp);
+    const year = timestamp.getFullYear();
+
+    console.log('📊 Upload processing started:', {
+      tradeId,
+      weekNumber,
+      year,
+      filePath: req.file?.path
+    });
+
+    try {
+      const tradeContext = await getTradeContext(db, weekNumber, year);
+      const fileStats = getFileStats(req.file.path);
+
+      let analysis;
+      try {
+        analysis = await claudeService.analyzeTradeScreenshot(
+          req.file.path,
+          tradeContext
+        );
+      } catch (claudeError) {
+        if (claudeError.message.includes('API key') || claudeError.message.includes('authentication_error')) {
+          console.log('⚠️ Using fallback analysis due to API key issue');
+          analysis = createFallbackAnalysis(req.body.notes || '');
+        } else {
+          throw claudeError;
+        }
+      }
+
+      const validationResults = validateTradingRules(analysis);
+      const executionToken = `exec_${tradeId.substr(0, 8)}_${Date.now()}`;
+      const plannedPrices = extractPlannedPrices(analysis);
+
+      const tradeRecord = {
+        id: tradeId,
+        timestamp: timestamp.toISOString(),
+        screenshot_path: req.file.path,
+        setup_quality: analysis.setup_quality,
+        risk_reward_ratio: analysis.risk_reward_ratio,
+        pattern_type: analysis.pattern_type,
+        entry_quality: analysis.entry_quality,
+        stop_placement: analysis.stop_placement,
+        target_selection: analysis.target_selection,
+        ai_commentary: analysis.ai_commentary,
+        risk_amount: analysis.risk_amount,
+        within_limits: validationResults.riskCompliant,
+        session_timing: analysis.session_timing,
+        trade_frequency: analysis.trade_frequency,
+        learning_insights: analysis.learning_insights,
+        recommendation: analysis.recommendation,
+        week_number: weekNumber,
+        year: year,
+        execution_upload_token: executionToken,
+        planned_entry: plannedPrices.entry,
+        planned_stop: plannedPrices.stop,
+        planned_target: plannedPrices.target,
+        planned_rr: analysis.risk_reward_ratio,
+        trading_style: 'mnq_scalping',
+        analysis_specialization: 'mnq_specialist'
+      };
+
+      await insertTradeRecord(db, tradeRecord);
+      await updatePatternStats(db, analysis.pattern_type);
+
+      if (validationResults.violations.length > 0) {
+        await createRiskAlerts(db, tradeId, validationResults.violations);
+      }
+
+      const response = {
+        trade_id: tradeId,
+        analysis: analysis,
+        validation: validationResults,
+        execution_token: executionToken,
+        mnq_insights: provideMNQInsights(analysis),
+        file_info: {
+          size: fileStats?.size,
+          uploaded_at: timestamp.toISOString()
         }
       };
 
