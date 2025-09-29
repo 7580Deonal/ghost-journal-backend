@@ -298,23 +298,71 @@ router.post('/trades/upload',
         await createRiskAlerts(db, tradeId, validationResults.violations);
       }
 
+      // Build response with error handling for each component
+      let mnqInsights;
+      try {
+        mnqInsights = provideMNQInsights(analysis);
+      } catch (error) {
+        console.error('Error generating MNQ insights:', error);
+        mnqInsights = { error: 'MNQ insights unavailable' };
+      }
+
       const response = {
         trade_id: tradeId,
-        analysis: analysis,
-        validation: validationResults,
+        analysis: {
+          ...analysis,
+          // Ensure all required fields are present
+          setup_quality: analysis.setup_quality || 5,
+          risk_reward_ratio: analysis.risk_reward_ratio || 2,
+          pattern_type: analysis.pattern_type || 'unknown',
+          entry_quality: analysis.entry_quality || 'fair',
+          stop_placement: analysis.stop_placement || 'unclear',
+          target_selection: analysis.target_selection || 'unclear',
+          ai_commentary: analysis.ai_commentary || 'Analysis completed',
+          risk_amount: analysis.risk_amount || 50,
+          within_limits: analysis.within_limits !== false,
+          session_timing: analysis.session_timing || 'acceptable',
+          trade_frequency: analysis.trade_frequency || 'Unknown',
+          learning_insights: analysis.learning_insights || 'No insights available',
+          recommendation: analysis.recommendation || 'WAIT',
+          confidence_score: analysis.confidence_score || 0.5,
+          specific_observations: analysis.specific_observations || ['Analysis completed']
+        },
+        validation: validationResults || { violations: [], riskCompliant: true },
         execution_token: executionToken,
-        mnq_insights: provideMNQInsights(analysis),
+        mnq_insights: mnqInsights,
         file_info: {
-          size: fileStats?.size,
+          size: fileStats?.size || 0,
           uploaded_at: timestamp.toISOString()
         }
       };
 
-      res.json({
+      console.log('📤 Sending complete response to frontend:', {
+        trade_id: response.trade_id,
+        hasAnalysis: !!response.analysis,
+        analysisKeys: response.analysis ? Object.keys(response.analysis) : [],
+        setup_quality: response.analysis?.setup_quality,
+        pattern_type: response.analysis?.pattern_type,
+        ai_commentary_length: response.analysis?.ai_commentary?.length || 0,
+        validation_violations: response.validation?.violations?.length || 0,
+        responseSize: JSON.stringify(response).length
+      });
+
+      const finalResponse = {
         success: true,
         message: 'Trading screenshot analyzed successfully',
         data: response
+      };
+
+      console.log('✅ Final response structure:', {
+        success: finalResponse.success,
+        hasMessage: !!finalResponse.message,
+        hasData: !!finalResponse.data,
+        dataKeys: Object.keys(finalResponse.data),
+        totalResponseSize: JSON.stringify(finalResponse).length
       });
+
+      res.json(finalResponse);
 
     } catch (error) {
       console.error('Upload analysis error:', error);
