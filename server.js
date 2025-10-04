@@ -11,6 +11,7 @@ const uploadRoute = require('./src/routes/upload');
 const progressRoute = require('./src/routes/progress');
 const patternsRoute = require('./src/routes/patterns');
 const alertsRoute = require('./src/routes/alerts');
+const tradesRoute = require('./src/routes/trades');
 const { errorHandler, notFound } = require('./src/middleware/errorHandler');
 
 const app = express();
@@ -433,6 +434,82 @@ app.options('*', (req, res) => {
 });
 
 // ============================================================================
+// CRITICAL MISSING ENDPOINT FIX - GET /api/trades
+// ============================================================================
+
+app.get('/api/trades', async (req, res) => {
+  try {
+    const { getDatabase } = require('./src/models/database');
+    const db = getDatabase();
+
+    console.log('🔍 Fetching all trades for frontend (emergency fix)');
+
+    const allTrades = db.prepare(`
+      SELECT
+        id as trade_id,
+        pattern_type,
+        setup_quality,
+        risk_reward_ratio,
+        entry_quality,
+        target_selection as exit_quality,
+        setup_quality as overall_grade,
+        created_at,
+        timestamp as updated_at,
+        recommendation,
+        confidence_score,
+        risk_amount,
+        within_limits,
+        session_timing,
+        actual_outcome,
+        actual_pnl,
+        execution_quality_grade,
+        user_notes
+      FROM trades
+      ORDER BY created_at DESC
+    `).all();
+
+    const response = {
+      success: true,
+      trades: allTrades.map(trade => ({
+        trade_id: trade.trade_id,
+        pattern_type: trade.pattern_type,
+        setup_quality: trade.setup_quality,
+        risk_reward_ratio: trade.risk_reward_ratio,
+        entry_quality: trade.entry_quality,
+        exit_quality: trade.exit_quality,
+        overall_grade: trade.overall_grade,
+        created_at: trade.created_at,
+        updated_at: trade.updated_at,
+        recommendation: trade.recommendation,
+        confidence_score: trade.confidence_score,
+        risk_amount: trade.risk_amount,
+        within_limits: trade.within_limits === 1,
+        session_timing: trade.session_timing,
+        actual_outcome: trade.actual_outcome,
+        actual_pnl: trade.actual_pnl,
+        execution_quality_grade: trade.execution_quality_grade,
+        has_notes: !!trade.user_notes
+      })),
+      total: allTrades.length,
+      emergency_fix: true
+    };
+
+    console.log('✅ All trades retrieved (emergency fix):', { count: allTrades.length });
+    res.json(response);
+    db.close();
+
+  } catch (error) {
+    console.error('❌ Error fetching trades (emergency fix):', error);
+    res.status(500).json({
+      success: false,
+      error: 'DATABASE_ERROR',
+      message: 'Failed to retrieve trades',
+      code: 500
+    });
+  }
+});
+
+// ============================================================================
 // HEALTH CHECK ENDPOINT - Enhanced for Production Monitoring
 // ============================================================================
 
@@ -527,6 +604,7 @@ app.use('/api', uploadRoute);
 app.use('/api', progressRoute);
 app.use('/api', patternsRoute);
 app.use('/api', alertsRoute);
+app.use('/api', tradesRoute);
 
 // ============================================================================
 // ERROR HANDLING
